@@ -21,6 +21,17 @@ info:
     `web.api.json.referer.hosts`. When that property is set, requests whose
     `Referer` header host is not on the allowlist are rejected with HTTP 400
     and body `{"message":"Referer is invalid."}`. See per-operation notes.
+
+    ## RAG chat (AI search mode)
+
+    The `/chat` and `/chat/stream` endpoints power the AI (RAG) search mode.
+    They are available only when `rag.chat.enabled=true`; when the feature is
+    disabled the endpoints are not registered and requests fall through
+    (typically HTTP 404). `/chat` returns a JSON body, while `/chat/stream`
+    returns a Server-Sent Events (`text/event-stream`) stream. Chat error
+    bodies use the shape `{"status":"error","message":"..."}` (distinct from
+    the `Error` schema used by the search endpoints), and JSONP (`callback`)
+    does not apply to either chat endpoint.
   license:
     name: Apache 2.0
     url: http://www.apache.org/licenses/LICENSE-2.0.html
@@ -41,6 +52,8 @@ tags:
     description: "Suggest operations"
   - name: favorite
     description: "Favorite operations"
+  - name: chat
+    description: "RAG chat operations (AI search mode)"
 paths:
   /documents:
     get:
@@ -1025,6 +1038,353 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /chat:
+    post:
+      tags:
+        - chat
+      summary: One-shot RAG chat completion
+      description: |-
+        Synchronous Retrieval-Augmented Generation (RAG) chat completion used
+        by the AI search mode. The conversation is identified by `sessionId`;
+        when omitted the server creates one and returns it in the response.
+
+        **Feature gate.** Available only when `rag.chat.enabled=true`. When the
+        feature is disabled the endpoint is not registered and the request
+        falls through (typically HTTP 404).
+
+        **Parameter transport.** Parameters are read via the servlet
+        `getParameter` API, so they may be supplied either in the query string
+        or as an `application/x-www-form-urlencoded` request body.
+
+        **Clearing a session.** Send `clear=true` together with a non-blank
+        `sessionId` and a blank `message` to delete the conversation history
+        instead of generating a reply.
+
+        Values supplied in `fields.label` or `ex_q` that are not present in the
+        configured allowlists are dropped silently from the resolved request.
+      operationId: chat
+      parameters:
+        - name: message
+          in: query
+          description: |-
+            Chat message. Required for a normal completion; may be blank only
+            when clearing a session (see `clear`). Rejected with HTTP 400 when
+            longer than `rag.chat.message.max.length` characters (default 4000).
+          required: false
+          schema:
+            type: string
+            example: What is Fess?
+        - name: sessionId
+          in: query
+          description: |-
+            Conversation session ID. When omitted, the server creates a new
+            session and returns its ID in the response.
+          required: false
+          schema:
+            type: string
+            example: 1a2b3c4d5e6f
+        - name: clear
+          in: query
+          description: |-
+            When set to `true` with a non-blank `sessionId` and a blank
+            `message`, the conversation history for that session is cleared.
+          required: false
+          schema:
+            type: string
+            enum: ["true"]
+        - name: fields.label
+          in: query
+          description: |-
+            Restricts retrieval to allowlisted label values; repeatable. Values
+            not present in the configured label set are ignored.
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+            example: [name]
+        - name: ex_q
+          in: query
+          description: |-
+            Allowlisted facet query expressions; repeatable. Values not present
+            in the configured facet query set are ignored. Values belonging to
+            the same facet query view are OR-joined into a single clause.
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        '200':
+          description: |-
+            Successful chat completion, or a successful session clear (when
+            `clear=true` was supplied — in that case `content` is
+            `"Session cleared"` and `sources` is absent).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |-
+            Bad request. Returned when `message` is blank (and the request is
+            not a session clear), or when `message` exceeds
+            `rag.chat.message.max.length`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatError'
+        '404':
+          description: |-
+            The session targeted by `clear=true` was not found or is not owned
+            by the current user. Body is
+            `{"status":"error","message":"Session not found"}`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatError'
+        '405':
+          description: |-
+            Requested HTTP method is not allowed (only `POST` is accepted).
+            Body is `{"status":"error","message":"Method not allowed"}`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatError'
+        '500':
+          description: |-
+            Internal server error. Body is
+            `{"status":"error","message":"Internal server error"}`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatError'
+
+  /chat/stream:
+    get:
+      tags:
+        - chat
+      summary: Streaming RAG chat completion (SSE)
+      description: |-
+        Streaming variant of `POST /chat`, used by the AI search mode to render
+        the answer progressively. The success response is a Server-Sent Events
+        (`text/event-stream`) stream of named events:
+
+        - `phase` — pipeline phase transition. On start:
+          `{ phase, status: "start", message, keywords? }`. On completion:
+          `{ phase, status: "complete", ... }` plus any additional non-reserved
+          fields carried by the phase payload (the keys `phase` and `status`
+          are reserved and never overridden).
+        - `chunk` — partial generated text (`{ content }`). Emitted only for
+          non-empty fragments.
+        - `sources` — retrieved sources (`{ sources: [ChatSource] }`). Emitted
+          only when at least one source was retrieved.
+        - `retry` — transient failure backoff
+          (`{ phase, operation, attempt, maxAttempts, sleepMs, cause? }`).
+        - `waiting` — long-running phase progress
+          (`{ phase, reason, elapsedMs, timeoutMs }`).
+        - `fallback` — query rewrite or strategy fallback
+          (`{ phase, reason, originalQuery?, newQuery? }`).
+        - `warning` — recoverable warning (`{ phase, code, detail? }`).
+        - `done` — end of stream (`{ sessionId, htmlContent? }`).
+        - `error` — terminal mid-stream failure
+          (`{ phase?, message, errorCode }`). For LLM errors `message` carries
+          the same string as `errorCode`.
+
+        **Feature gate.** Available only when `rag.chat.enabled=true`.
+
+        **Parameter transport.** Parameters are read via `getParameter`, so for
+        `POST` they may be supplied in the query string or as an
+        `application/x-www-form-urlencoded` body.
+
+        Pre-stream validation failures (missing/blank `message`, message too
+        long, disallowed method) are returned as a JSON body
+        `{"status":"error","message":"..."}` with the corresponding HTTP status
+        instead of an SSE stream. Once streaming has begun, failures are
+        delivered as an `error` SSE event rather than an HTTP error status.
+
+        Values supplied in `fields.label` or `ex_q` that are not present in the
+        configured allowlists are dropped silently.
+      operationId: chatStream
+      parameters:
+        - name: message
+          in: query
+          description: |-
+            Chat message. Required. Rejected with HTTP 400 when longer than
+            `rag.chat.message.max.length` characters (default 4000).
+          required: true
+          schema:
+            type: string
+            example: What is Fess?
+        - name: sessionId
+          in: query
+          description: |-
+            Conversation session ID. When omitted, the server creates a new
+            session and returns its ID in the `done` event.
+          required: false
+          schema:
+            type: string
+            example: 1a2b3c4d5e6f
+        - name: fields.label
+          in: query
+          description: |-
+            Restricts retrieval to allowlisted label values; repeatable. Values
+            not present in the configured label set are ignored.
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+            example: [name]
+        - name: ex_q
+          in: query
+          description: |-
+            Allowlisted facet query expressions; repeatable. Values not present
+            in the configured facet query set are ignored. Values belonging to
+            the same facet query view are OR-joined into a single clause.
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        '200':
+          description: SSE stream of generation events.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |
+                  event: phase
+                  data: {"phase":"retrieval","status":"start","message":"Searching..."}
+
+                  event: chunk
+                  data: {"content":"Fess is "}
+
+                  event: sources
+                  data: {"sources":[{"index":0,"title":"Fess","url":"https://fess.codelibs.org/","docId":"abc","snippet":"...","urlLink":"https://fess.codelibs.org/","goUrl":"/go/..."}]}
+
+                  event: done
+                  data: {"sessionId":"1a2b3c4d5e6f","htmlContent":"<p>Fess is ...</p>"}
+        '400':
+          description: |-
+            Bad request returned before the stream starts. Body is
+            `{"status":"error","message":"..."}` (e.g. `Message is required` or
+            `Message is too long (max 4000 characters)`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatError'
+        '405':
+          description: |-
+            Requested HTTP method is not allowed (only `GET` and `POST` are
+            accepted). Body is `{"status":"error","message":"Method not allowed"}`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatError'
+        '500':
+          description: |-
+            Internal server error before the stream starts. Body is
+            `{"status":"error","message":"..."}`. Errors that occur after the
+            stream has started are reported via an `error` SSE event instead.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatError'
+    post:
+      tags:
+        - chat
+      summary: Streaming RAG chat completion (SSE)
+      description: |-
+        Identical to `GET /chat/stream`; see that operation for the full event
+        list and behavior. `POST` accepts the same parameters via the query
+        string or an `application/x-www-form-urlencoded` body.
+      operationId: chatStreamPost
+      parameters:
+        - name: message
+          in: query
+          description: |-
+            Chat message. Required. Rejected with HTTP 400 when longer than
+            `rag.chat.message.max.length` characters (default 4000).
+          required: true
+          schema:
+            type: string
+            example: What is Fess?
+        - name: sessionId
+          in: query
+          description: |-
+            Conversation session ID. When omitted, the server creates a new
+            session and returns its ID in the `done` event.
+          required: false
+          schema:
+            type: string
+            example: 1a2b3c4d5e6f
+        - name: fields.label
+          in: query
+          description: |-
+            Restricts retrieval to allowlisted label values; repeatable. Values
+            not present in the configured label set are ignored.
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+            example: [name]
+        - name: ex_q
+          in: query
+          description: |-
+            Allowlisted facet query expressions; repeatable. Values not present
+            in the configured facet query set are ignored. Values belonging to
+            the same facet query view are OR-joined into a single clause.
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        '200':
+          description: SSE stream of generation events. See `GET /chat/stream`.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: |-
+            Bad request returned before the stream starts. Body is
+            `{"status":"error","message":"..."}`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatError'
+        '405':
+          description: |-
+            Requested HTTP method is not allowed (only `GET` and `POST` are
+            accepted). Body is `{"status":"error","message":"Method not allowed"}`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatError'
+        '500':
+          description: |-
+            Internal server error before the stream starts. Errors after the
+            stream has started are reported via an `error` SSE event.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatError'
+
 components:
   responses:
     BadRequest:
@@ -1085,4 +1445,92 @@ components:
             Human-readable exception detail. Present only when exception
             details are exposed via configuration.
           example: "This is an error message."
+    ChatResponse:
+      type: object
+      description: |-
+        Success body for `POST /chat`. Field names are emitted in camelCase
+        (the handler serialises with a plain Jackson `ObjectMapper`).
+      required:
+        - status
+        - sessionId
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          example: ok
+        sessionId:
+          type: string
+          description: |-
+            The session ID for the conversation. Echoes the request value or
+            carries the server-generated ID when none was supplied.
+          example: 1a2b3c4d5e6f
+        content:
+          type: string
+          nullable: true
+          description: |-
+            The generated answer text. For a session-clear response this is the
+            literal `"Session cleared"`. May be `null` when the model produced
+            no content.
+          example: "Fess is an open source enterprise search server."
+        sources:
+          type: array
+          description: |-
+            Documents referenced by the answer. Absent when the underlying
+            message carries no sources (e.g. a session-clear response).
+          items:
+            $ref: '#/components/schemas/ChatSource'
+    ChatError:
+      type: object
+      description: |-
+        Error body for the chat endpoints. Distinct from the `Error` schema used
+        by the search endpoints.
+      required:
+        - status
+        - message
+      properties:
+        status:
+          type: string
+          enum: [error]
+          example: error
+        message:
+          type: string
+          description: Human-readable error message.
+          example: "Message is required"
+    ChatSource:
+      type: object
+      description: |-
+        A document referenced by the chat answer. Serialised from the
+        `ChatMessage.ChatSource` entity with a plain Jackson `ObjectMapper`, so
+        every property is present (camelCase keys; unset values are `null`).
+      properties:
+        index:
+          type: integer
+          description: 0-based position of this source in the retrieved set.
+          example: 0
+        title:
+          type: string
+          nullable: true
+          example: "Open Source Enterprise Search Server: Fess"
+        url:
+          type: string
+          nullable: true
+          example: "https://fess.codelibs.org/"
+        docId:
+          type: string
+          nullable: true
+          example: "e79fbfdfb09d4bffb58ec230c68f6f7e"
+        snippet:
+          type: string
+          nullable: true
+          example: "Fess is a very powerful and easily deployable enterprise search server."
+        urlLink:
+          type: string
+          nullable: true
+          description: The ViewHelper-processed URL for display.
+          example: "https://fess.codelibs.org/"
+        goUrl:
+          type: string
+          nullable: true
+          description: The go-link URL for navigation with access control and click logging.
+          example: "/go/e79fbfdfb09d4bffb58ec230c68f6f7e"
     
