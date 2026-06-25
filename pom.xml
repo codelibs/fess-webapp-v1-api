@@ -4,13 +4,13 @@
 	<artifactId>fess-webapp-v1-api</artifactId>
 	<packaging>jar</packaging>
 	<name>Deprecated v1 REST API Plugin</name>
-	<version>15.7.0</version>
+	<version>15.7.1-SNAPSHOT</version>
 	<description>Deprecated v1 REST API plugin for Fess providing backward compatibility for /api/v1/* endpoints.</description>
 	<scm>
 		<connection>scm:git:git@github.com:codelibs/fess-webapp-v1-api.git</connection>
 		<developerConnection>scm:git:git@github.com:codelibs/fess-webapp-v1-api.git</developerConnection>
 		<url>https://github.com/codelibs/fess-webapp-v1-api</url>
-	  <tag>fess-webapp-v1-api-15.7.0</tag>
+	  <tag>HEAD</tag>
   </scm>
 	<parent>
 		<groupId>org.codelibs.fess</groupId>
