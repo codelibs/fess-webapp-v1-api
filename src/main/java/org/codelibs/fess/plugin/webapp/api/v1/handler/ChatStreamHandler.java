@@ -29,7 +29,6 @@ import org.codelibs.fess.Constants;
 import org.codelibs.fess.chat.ChatClient.ChatResult;
 import org.codelibs.fess.chat.ChatPhaseCallback;
 import org.codelibs.fess.entity.ChatMessage.ChatSource;
-import org.codelibs.fess.helper.SseResponseHelper;
 import org.codelibs.fess.llm.LlmException;
 import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.util.ComponentUtil;
@@ -109,7 +108,7 @@ public class ChatStreamHandler extends AbstractChatHandler {
         // Set SSE headers (shared with v2 ChatStreamHandler via SseResponseHelper) PLUS the operator-
         // configured api.json.response.headers (CORS, security headers) — SseResponseHelper only
         // emits SSE-specific headers.
-        SseResponseHelper.applySseHeaders(response);
+        ComponentUtil.getSseResponseHelper().applySseHeaders(response);
         applyJsonResponseHeaders(response);
 
         // Do NOT wrap the writer in try-with-resources: the servlet container manages the
