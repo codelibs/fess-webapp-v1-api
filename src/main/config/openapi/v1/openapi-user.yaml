@@ -35,10 +35,10 @@ info:
   license:
     name: Apache 2.0
     url: http://www.apache.org/licenses/LICENSE-2.0.html
-  version: 15.7.0
+  version: 15.9.0
 externalDocs:
   description: API Documentation
-  url: https://fess.codelibs.org/15.7/api/
+  url: https://fess.codelibs.org/15.9/api/
 servers:
   - url: http://localhost:8080/api/v1
 tags:
@@ -295,6 +295,12 @@ paths:
                       type: string
                     example: ["1", "2", "3", "4", "5"]
                   partial:
+                    type: boolean
+                    example: false
+                  timed_out:
+                    type: boolean
+                    example: false
+                  shard_failed:
                     type: boolean
                     example: false
                   search_query:
