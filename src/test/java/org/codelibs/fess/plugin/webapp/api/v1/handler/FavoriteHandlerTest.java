@@ -36,7 +36,7 @@ import org.dbflute.optional.OptionalEntity;
 import org.dbflute.optional.OptionalThing;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
-import org.opensearch.action.update.UpdateRequestBuilder;
+import org.codelibs.fesen.opensearch.action.update.UpdateRequestBuilder;
 
 import jakarta.servlet.http.HttpServletResponse;
 
