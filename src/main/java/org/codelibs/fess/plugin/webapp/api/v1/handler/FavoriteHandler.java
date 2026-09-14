@@ -35,7 +35,7 @@ import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.util.ComponentUtil;
 import org.codelibs.fess.util.DocumentUtil;
 import org.dbflute.optional.OptionalThing;
-import org.opensearch.script.Script;
+import org.codelibs.fesen.opensearch.script.Script;
 
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
