@@ -20,6 +20,7 @@ import java.util.List;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.api.BaseApiManager;
 import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.plugin.webapp.api.v1.handler.AbstractApiHandler;
@@ -34,6 +35,8 @@ import org.codelibs.fess.plugin.webapp.api.v1.handler.PopularWordHandler;
 import org.codelibs.fess.plugin.webapp.api.v1.handler.ScrollSearchHandler;
 import org.codelibs.fess.plugin.webapp.api.v1.handler.SearchHandler;
 import org.codelibs.fess.plugin.webapp.api.v1.handler.SuggestHandler;
+import org.codelibs.fess.app.service.AccessTokenService;
+import org.codelibs.fess.exception.InvalidAccessTokenException;
 import org.codelibs.fess.util.ComponentUtil;
 
 import jakarta.annotation.PostConstruct;
@@ -106,12 +109,95 @@ public class SearchApiManager extends BaseApiManager {
             throws IOException, ServletException {
         for (final ApiHandler handler : handlers) {
             if (handler.matches(request)) {
+                final int refusal = getRefusalStatus(handler, request);
+                if (refusal != 0) {
+                    AbstractApiHandler.writeJsonResponse(refusal, AbstractApiHandler.escapeJsonKeyValue("message",
+                            refusal == HttpServletResponse.SC_FORBIDDEN ? "The chat is not permitted for this user." : "Login required."),
+                            mimeType);
+                    return;
+                }
                 handler.handle(request, response, chain);
                 return;
             }
         }
         AbstractApiHandler.writeJsonResponse(HttpServletResponse.SC_NOT_FOUND,
                 AbstractApiHandler.escapeJsonKeyValue("message", "Not found."), mimeType);
+    }
+
+    /**
+     * Decides whether a matched request is refused before its handler runs.
+     *
+     * <p>The v2 API refuses an anonymous caller while {@code login.required} is on, and the chat to a user
+     * outside {@code rag.chat.permissions}. This family answered both anonymously, so the same checks are
+     * made here. Only the health check is served without a login. As in v2, a registered, unexpired access
+     * token stands in for the login on the endpoints where the token decides what the caller sees: search,
+     * scroll, suggest, labels and popular words. The favorites and the chat act for a signed-in user.</p>
+     *
+     * @param handler the handler the request matched
+     * @param request the incoming request
+     * @return 0 to serve the request, otherwise the status to refuse it with
+     */
+    protected int getRefusalStatus(final ApiHandler handler, final HttpServletRequest request) {
+        if (handler instanceof PingHandler) {
+            return 0;
+        }
+        final boolean chat = handler instanceof ChatHandler || handler instanceof ChatStreamHandler;
+        final boolean loggedIn = isLoggedIn();
+        if (chat && !isChatPermitted()) {
+            return loggedIn ? HttpServletResponse.SC_FORBIDDEN : HttpServletResponse.SC_UNAUTHORIZED;
+        }
+        if (!isLoginRequired() || loggedIn) {
+            return 0;
+        }
+        final boolean acceptsToken = !chat && !(handler instanceof FavoriteHandler) && !(handler instanceof FavoritesHandler);
+        return acceptsToken && hasValidAccessToken(request) ? 0 : HttpServletResponse.SC_UNAUTHORIZED;
+    }
+
+    /**
+     * Returns whether a user is logged in to the current session.
+     *
+     * @return true if one is
+     */
+    protected boolean isLoggedIn() {
+        return ComponentUtil.getFessLoginAssist().getSavedUserBean().isPresent();
+    }
+
+    /**
+     * Returns whether {@code login.required} is on.
+     *
+     * @return true if it is
+     */
+    protected boolean isLoginRequired() {
+        return ComponentUtil.getFessConfig().isLoginRequired();
+    }
+
+    /**
+     * Returns whether the current user may use the chat ({@code rag.chat.permissions}).
+     *
+     * @return true if the user may
+     */
+    protected boolean isChatPermitted() {
+        return ComponentUtil.getChatApiHelper().isChatPermitted();
+    }
+
+    /**
+     * Returns whether the request carries a registered, unexpired access token.
+     *
+     * @param request the incoming request
+     * @return true if it does
+     */
+    protected boolean hasValidAccessToken(final HttpServletRequest request) {
+        if (StringUtil.isBlank(ComponentUtil.getAccessTokenHelper().getAccessTokenFromRequest(request))) {
+            return false;
+        }
+        try {
+            return ComponentUtil.getComponent(AccessTokenService.class).getTokenPermissions(request).isPresent();
+        } catch (final InvalidAccessTokenException e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("The access token was refused.", e);
+            }
+            return false;
+        }
     }
 
     @Override
